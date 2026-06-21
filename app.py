@@ -199,7 +199,7 @@ def get_or_create_worksheet(name: str, headers: List[str], rows: int = 1000, col
 # =============================
 def read_form_responses() -> pd.DataFrame:
     ws = get_spreadsheet().worksheet(FORM_SHEET_NAME)
-    records = ws.get_all_records(default_blank="")
+    records = ws.get_all_records(default_blank="", numericise_ignore=["all"])
     df = pd.DataFrame(records)
     if df.empty:
         return pd.DataFrame()
@@ -246,14 +246,14 @@ def read_form_responses() -> pd.DataFrame:
     if df["consent_followup"].replace("", pd.NA).isna().all():
         df["consent_followup"] = "Yes, send me a personalized follow-up email"
 
-    df = df[standard_cols].fillna("")
+    df = df[standard_cols].fillna("").astype(str)
     df["response_id"] = df.apply(lambda r: make_response_id(r.to_dict()), axis=1)
     return df
 
 
 def read_ai_output() -> pd.DataFrame:
     ws = get_or_create_worksheet(AI_OUTPUT_SHEET_NAME, AI_OUTPUT_HEADERS)
-    records = ws.get_all_records(default_blank="")
+    records = ws.get_all_records(default_blank="", numericise_ignore=["all"])
     df = pd.DataFrame(records)
     if df.empty:
         df = pd.DataFrame(columns=AI_OUTPUT_HEADERS)
@@ -261,7 +261,7 @@ def read_ai_output() -> pd.DataFrame:
     for c in AI_OUTPUT_HEADERS:
         if c not in df.columns:
             df[c] = ""
-    return df[AI_OUTPUT_HEADERS].fillna("")
+    return df[AI_OUTPUT_HEADERS].fillna("").astype(str)
 
 
 def write_ai_output(df: pd.DataFrame):
@@ -293,14 +293,14 @@ def append_room_summary(summary: Dict[str, Any], total_responses: int, raw_text:
 
 def get_latest_room_summary() -> pd.DataFrame:
     ws = get_or_create_worksheet(ROOM_SUMMARY_SHEET_NAME, ROOM_SUMMARY_HEADERS)
-    records = ws.get_all_records(default_blank="")
+    records = ws.get_all_records(default_blank="", numericise_ignore=["all"])
     df = pd.DataFrame(records)
     if df.empty:
         return pd.DataFrame(columns=ROOM_SUMMARY_HEADERS)
     for c in ROOM_SUMMARY_HEADERS:
         if c not in df.columns:
             df[c] = ""
-    return df[ROOM_SUMMARY_HEADERS]
+    return df[ROOM_SUMMARY_HEADERS].fillna("").astype(str)
 
 # =============================
 # Gemini API
@@ -573,7 +573,7 @@ with tab1:
 
         st.subheader("Latest Responses")
         display_cols = ["timestamp", "name", "audience_type", "industry", "ai_level", "interested_topics", "ai_expectation", "ai_question"]
-        st.dataframe(form_df[display_cols].tail(20), use_container_width=True, hide_index=True)
+        st.dataframe(form_df[display_cols].tail(20), width="stretch", hide_index=True)
 
 # =============================
 # Tab 2: AI Room Summary
@@ -692,39 +692,23 @@ with tab3:
                 st.write(f"**Recommended sections:** {row.get('recommended_sections', '')}")
                 st.write(f"**Question/Concern:** {row.get('ai_question', '')}")
 
-                # Streamlit widget values persist in session_state after first render.
-                # If an email was generated after the widgets first appeared, the old empty
-                # session_state value can override the sheet value. This block hydrates the
-                # editable fields from Google Sheet whenever the widget is blank or the
-                # generated sheet content has changed.
-                subject_key = f"subject_{row['response_id']}"
-                body_key = f"body_{row['response_id']}"
+                # Use unique, source-aware widget keys. This avoids Streamlit errors caused by
+                # modifying st.session_state after a widget is instantiated, and also prevents
+                # duplicate/auto-converted response IDs from sharing the same widget state.
                 source_subject = safe_str(row.get("email_subject", ""))
                 source_body = safe_str(row.get("email_body", ""))
-                subject_source_key = f"subject_source_{row['response_id']}"
-                body_source_key = f"body_source_{row['response_id']}"
+                row_id = safe_str(row.get("response_id", "")) or str(idx)
+                widget_fingerprint = hashlib.md5(
+                    f"{row_id}|{idx}|{source_subject}|{source_body}".encode("utf-8")
+                ).hexdigest()[:8]
+                subject_key = f"subject_{row_id}_{idx}_{widget_fingerprint}"
+                body_key = f"body_{row_id}_{idx}_{widget_fingerprint}"
 
-                if (
-                    subject_key not in st.session_state
-                    or safe_str(st.session_state.get(subject_key, "")).strip() == ""
-                    or st.session_state.get(subject_source_key) != source_subject
-                ):
-                    st.session_state[subject_key] = source_subject
-                    st.session_state[subject_source_key] = source_subject
-
-                if (
-                    body_key not in st.session_state
-                    or safe_str(st.session_state.get(body_key, "")).strip() == ""
-                    or st.session_state.get(body_source_key) != source_body
-                ):
-                    st.session_state[body_key] = source_body
-                    st.session_state[body_source_key] = source_body
-
-                subject = st.text_input("Subject", key=subject_key)
-                body = st.text_area("Email body", height=360, key=body_key)
+                subject = st.text_input("Subject", value=source_subject, key=subject_key)
+                body = st.text_area("Email body", value=source_body, height=360, key=body_key)
 
                 b1, b2, b3, b4 = st.columns(4)
-                if b1.button("💾 Save Edit", key=f"save_{row['response_id']}"):
+                if b1.button("💾 Save Edit", key=f"save_{row['response_id']}_{idx}"):
                     output_df.loc[output_df["response_id"] == row["response_id"], "email_subject"] = subject
                     output_df.loc[output_df["response_id"] == row["response_id"], "email_body"] = body
                     output_df.loc[output_df["response_id"] == row["response_id"], "last_updated"] = now_str()
@@ -732,7 +716,7 @@ with tab3:
                     st.success("Saved.")
                     st.rerun()
 
-                if b2.button("✅ Mark Reviewed", key=f"review_{row['response_id']}"):
+                if b2.button("✅ Mark Reviewed", key=f"review_{row['response_id']}_{idx}"):
                     output_df.loc[output_df["response_id"] == row["response_id"], "email_subject"] = subject
                     output_df.loc[output_df["response_id"] == row["response_id"], "email_body"] = body
                     output_df.loc[output_df["response_id"] == row["response_id"], "reviewed"] = "Yes"
@@ -742,7 +726,7 @@ with tab3:
                     st.success("Marked reviewed.")
                     st.rerun()
 
-                if b3.button("📨 Send Now", key=f"send_{row['response_id']}"):
+                if b3.button("📨 Send Now", key=f"send_{row['response_id']}_{idx}"):
                     if not safe_str(subject).strip() or not safe_str(body).strip():
                         st.error("Subject and email body cannot be empty. Please generate or edit the email before sending.")
                     else:
@@ -762,7 +746,7 @@ with tab3:
                             st.error(f"Send failed: {msg}")
                         st.rerun()
 
-                if b4.button("⏭️ Skip", key=f"skip_{row['response_id']}"):
+                if b4.button("⏭️ Skip", key=f"skip_{row['response_id']}_{idx}"):
                     output_df.loc[output_df["response_id"] == row["response_id"], "status"] = "Skipped"
                     output_df.loc[output_df["response_id"] == row["response_id"], "last_updated"] = now_str()
                     write_ai_output(output_df)
@@ -781,7 +765,7 @@ with tab4:
     else:
         status_counts = output_df["status"].replace("", "New").value_counts().reset_index()
         status_counts.columns = ["Status", "Count"]
-        st.dataframe(status_counts, use_container_width=True, hide_index=True)
+        st.dataframe(status_counts, width="stretch", hide_index=True)
 
         st.markdown("### Send test email")
         test_to = st.text_input("Test recipient email", value=st.secrets.get("GMAIL_USER", ""))
@@ -834,7 +818,7 @@ with tab4:
 
         st.markdown("### Email Log")
         log_cols = ["name", "email", "status", "reviewed", "sent_at", "error_message", "last_updated"]
-        st.dataframe(output_df[log_cols], use_container_width=True, hide_index=True)
+        st.dataframe(output_df[log_cols], width="stretch", hide_index=True)
 
         csv = output_df.to_csv(index=False).encode("utf-8")
         st.download_button(
